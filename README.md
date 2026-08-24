@@ -152,6 +152,19 @@ written to a log line at any level.
 
 ## Troubleshooting
 
+### Bot crashes on startup with `discord.errors.Forbidden: 403 Forbidden (error code: 50001): Missing Access`
+
+This happens during the guild command sync in `setup_hook`, and almost always means one of:
+
+- The bot was invited with only the `bot` OAuth2 scope, missing `applications.commands`. Regenerate the
+  invite URL under **OAuth2 → URL Generator** with both scopes checked (see
+  [Discord bot setup](#discord-bot-setup)), open it, and re-authorize — you don't need to remove the bot
+  from the server first, re-authorizing adds the missing scope to its existing membership.
+- `DISCORD_GUILD_ID` doesn't match a guild the bot has actually joined. Double-check the ID (right-click
+  the server with Developer Mode enabled → **Copy Server ID**) against the one in your environment.
+
+The bot's own log output includes a line identifying which of these it's likely to be before the traceback.
+
 ### Pterodactyl API returns 403 when sending a power action
 
 The bot's client account authenticated successfully but isn't allowed to control that specific server. Go
