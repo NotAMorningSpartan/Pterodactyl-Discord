@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from typing import Any, Self
 
 import httpx
 
 from bot.config import Settings
 from bot.pterodactyl.models import PowerAction, PowerState, Server
+
+logger = logging.getLogger("bot")
 
 ACCEPT_HEADER = "Application/vnd.pterodactyl.v1+json"
 
@@ -24,7 +27,20 @@ class PterodactylClient:
     def __init__(self, settings: Settings) -> None:
         self._app_api_key = settings.pterodactyl_app_api_key
         self._client_api_key = settings.pterodactyl_client_api_key
-        self._http = httpx.AsyncClient(base_url=settings.pterodactyl_url.rstrip("/"))
+
+        if settings.pterodactyl_skip_ssl_verify:
+            logger.warning(
+                "PTERODACTYL_SKIP_SSL_VERIFY is enabled: TLS certificate verification is "
+                "disabled for all Pterodactyl API requests. This makes the API keys sent in "
+                "the Authorization header interceptable by anyone able to see this traffic. "
+                "Only use this as a stopgap on a trusted network -- fix the panel's "
+                "certificate instead when possible."
+            )
+
+        self._http = httpx.AsyncClient(
+            base_url=settings.pterodactyl_url.rstrip("/"),
+            verify=not settings.pterodactyl_skip_ssl_verify,
+        )
 
     async def aclose(self) -> None:
         await self._http.aclose()
