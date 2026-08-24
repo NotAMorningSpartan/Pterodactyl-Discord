@@ -4,9 +4,11 @@ from unittest.mock import AsyncMock
 import discord
 import httpx
 
+import bot.cogs.power as power_module
 from bot.cogs.power import (
     API_ERROR_MESSAGE,
     UNREACHABLE_MESSAGE,
+    KillConfirmView,
     PowerCog,
     ServerListPaginator,
     build_server_embeds,
@@ -26,6 +28,8 @@ def make_cog() -> PowerCog:
     cog = PowerCog.__new__(PowerCog)
     cog.bot = SimpleNamespace()
     cog.client = AsyncMock()
+    cog._server_cache = []
+    cog._server_cache_expiry = 0.0
     return cog
 
 
@@ -112,3 +116,214 @@ async def test_servers_command_reports_no_servers_found():
     await PowerCog.servers.callback(cog, interaction)
 
     interaction.edit_original_response.assert_awaited_once_with(content="No servers found.")
+
+
+# --- /server <action> group ---------------------------------------------------------
+
+
+async def test_autocomplete_returns_matching_choices():
+    cog = make_cog()
+    cog.client.list_servers.return_value = make_servers(3)
+    interaction = make_interaction()
+
+    choices = await cog._autocomplete_server(interaction, "server 2")
+
+    assert len(choices) == 1
+    assert choices[0].value == "srv002"
+    assert "Server 2" in choices[0].name
+
+
+async def test_autocomplete_matches_by_identifier_too():
+    cog = make_cog()
+    cog.client.list_servers.return_value = make_servers(3)
+    interaction = make_interaction()
+
+    choices = await cog._autocomplete_server(interaction, "srv003")
+
+    assert [c.value for c in choices] == ["srv003"]
+
+
+async def test_autocomplete_caches_within_ttl():
+    cog = make_cog()
+    cog.client.list_servers.return_value = make_servers(2)
+    interaction = make_interaction()
+
+    await cog._autocomplete_server(interaction, "")
+    await cog._autocomplete_server(interaction, "")
+
+    cog.client.list_servers.assert_awaited_once()
+
+
+async def test_autocomplete_returns_empty_list_on_api_failure():
+    cog = make_cog()
+    cog.client.list_servers.side_effect = httpx.ConnectError("connection refused")
+    interaction = make_interaction()
+
+    choices = await cog._autocomplete_server(interaction, "")
+
+    assert choices == []
+
+
+async def test_start_skips_action_when_already_running():
+    cog = make_cog()
+    cog.client.get_power_state.return_value = "running"
+    interaction = make_interaction()
+
+    await PowerCog.server_start.callback(cog, interaction, "srv001")
+
+    cog.client.send_power_action.assert_not_called()
+    interaction.edit_original_response.assert_awaited_with(content="`srv001` is already running.")
+
+
+async def test_start_sends_action_when_offline():
+    cog = make_cog()
+    cog.client.get_power_state.return_value = "offline"
+    interaction = make_interaction()
+
+    await PowerCog.server_start.callback(cog, interaction, "srv001")
+
+    cog.client.send_power_action.assert_awaited_once_with("srv001", "start")
+    interaction.edit_original_response.assert_awaited_with(content="Sent **start** to `srv001`.")
+
+
+async def test_stop_skips_action_when_already_offline():
+    cog = make_cog()
+    cog.client.get_power_state.return_value = "offline"
+    interaction = make_interaction()
+
+    await PowerCog.server_stop.callback(cog, interaction, "srv001")
+
+    cog.client.send_power_action.assert_not_called()
+    interaction.edit_original_response.assert_awaited_with(content="`srv001` is already stopped.")
+
+
+async def test_restart_never_checks_current_state():
+    cog = make_cog()
+    interaction = make_interaction()
+
+    await PowerCog.server_restart.callback(cog, interaction, "srv001")
+
+    cog.client.get_power_state.assert_not_called()
+    cog.client.send_power_action.assert_awaited_once_with("srv001", "restart")
+
+
+async def test_power_action_reports_server_not_found():
+    cog = make_cog()
+    cog.client.send_power_action.side_effect = PterodactylAPIError("srv001", 404, "Not found")
+    interaction = make_interaction()
+
+    await PowerCog.server_restart.callback(cog, interaction, "srv001")
+
+    interaction.edit_original_response.assert_awaited_with(
+        content="No server found with identifier `srv001`."
+    )
+
+
+async def test_power_action_reports_unreachable_api():
+    cog = make_cog()
+    cog.client.send_power_action.side_effect = httpx.ConnectError("connection refused")
+    interaction = make_interaction()
+
+    await PowerCog.server_restart.callback(cog, interaction, "srv001")
+
+    interaction.edit_original_response.assert_awaited_with(content=UNREACHABLE_MESSAGE)
+
+
+async def test_power_action_reports_generic_api_error():
+    cog = make_cog()
+    cog.client.send_power_action.side_effect = PterodactylAPIError("srv001", 500, "boom")
+    interaction = make_interaction()
+
+    await PowerCog.server_restart.callback(cog, interaction, "srv001")
+
+    interaction.edit_original_response.assert_awaited_with(content=API_ERROR_MESSAGE)
+
+
+# --- /server kill confirmation --------------------------------------------------------
+
+
+async def test_kill_confirm_view_confirm_button_sets_confirmed():
+    view = KillConfirmView(author_id=1)
+    interaction = AsyncMock(spec=discord.Interaction)
+    interaction.response = AsyncMock()
+
+    await view.confirm_button.callback(interaction)
+
+    assert view.confirmed is True
+    assert all(item.disabled for item in view.children)
+    interaction.response.edit_message.assert_awaited_once()
+
+
+async def test_kill_confirm_view_cancel_button_leaves_unconfirmed():
+    view = KillConfirmView(author_id=1)
+    interaction = AsyncMock(spec=discord.Interaction)
+    interaction.response = AsyncMock()
+
+    await view.cancel_button.callback(interaction)
+
+    assert view.confirmed is False
+    interaction.response.edit_message.assert_awaited_once()
+
+
+async def test_kill_confirm_view_timeout_leaves_unconfirmed():
+    view = KillConfirmView(author_id=1)
+    view.confirmed = True
+
+    await view.on_timeout()
+
+    assert view.confirmed is False
+
+
+def _patch_kill_confirm_view(monkeypatch, *, confirmed: bool) -> AsyncMock:
+    fake_view = AsyncMock()
+    fake_view.confirmed = confirmed
+    fake_view.wait = AsyncMock(return_value=False)
+    monkeypatch.setattr(power_module, "KillConfirmView", lambda **kwargs: fake_view)
+    return fake_view
+
+
+async def test_server_kill_shows_confirmation_prompt_first(monkeypatch):
+    cog = make_cog()
+    interaction = make_interaction()
+    _patch_kill_confirm_view(monkeypatch, confirmed=False)
+
+    await PowerCog.server_kill.callback(cog, interaction, "srv001")
+
+    first_call = interaction.edit_original_response.call_args_list[0]
+    assert "force-kill" in first_call.kwargs["content"]
+    cog.client.send_power_action.assert_not_called()
+
+
+async def test_server_kill_does_nothing_when_cancelled(monkeypatch):
+    cog = make_cog()
+    interaction = make_interaction()
+    _patch_kill_confirm_view(monkeypatch, confirmed=False)
+
+    await PowerCog.server_kill.callback(cog, interaction, "srv001")
+
+    cog.client.get_power_state.assert_not_called()
+    cog.client.send_power_action.assert_not_called()
+
+
+async def test_server_kill_executes_when_confirmed(monkeypatch):
+    cog = make_cog()
+    cog.client.get_power_state.return_value = "running"
+    interaction = make_interaction()
+    _patch_kill_confirm_view(monkeypatch, confirmed=True)
+
+    await PowerCog.server_kill.callback(cog, interaction, "srv001")
+
+    cog.client.send_power_action.assert_awaited_once_with("srv001", "kill")
+
+
+async def test_server_kill_confirmed_but_already_offline_skips_action(monkeypatch):
+    cog = make_cog()
+    cog.client.get_power_state.return_value = "offline"
+    interaction = make_interaction()
+    _patch_kill_confirm_view(monkeypatch, confirmed=True)
+
+    await PowerCog.server_kill.callback(cog, interaction, "srv001")
+
+    cog.client.send_power_action.assert_not_called()
+    last_call = interaction.edit_original_response.call_args_list[-1]
+    assert "nothing to kill" in last_call.kwargs["content"]
