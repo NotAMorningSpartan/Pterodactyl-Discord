@@ -72,7 +72,18 @@ class PterodactylBot(commands.Bot):
 
         guild = discord.Object(id=self.settings.discord_guild_id)
         self.tree.copy_global_to(guild=guild)
-        synced = await self.tree.sync(guild=guild)
+        try:
+            synced = await self.tree.sync(guild=guild)
+        except discord.Forbidden:
+            logger.error(
+                "Failed to sync slash commands to guild %s: Discord returned 403 Forbidden. "
+                "This almost always means either (1) the bot was invited without the "
+                "'applications.commands' OAuth2 scope -- re-invite it with both 'bot' and "
+                "'applications.commands' checked, or (2) DISCORD_GUILD_ID doesn't match a "
+                "guild the bot has actually joined.",
+                self.settings.discord_guild_id,
+            )
+            raise
         logger.info(
             "Synced %d slash command(s) to guild %s", len(synced), self.settings.discord_guild_id
         )
