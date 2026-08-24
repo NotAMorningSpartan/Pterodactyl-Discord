@@ -1,9 +1,11 @@
 import json
+from unittest.mock import patch
 
 import httpx
 import pytest
 import respx
 
+from bot.config import Settings
 from bot.pterodactyl.client import PterodactylAPIError, PterodactylClient
 from bot.pterodactyl.models import Server
 from tests.conftest import APP_API_KEY, CLIENT_API_KEY, PANEL_URL
@@ -104,3 +106,22 @@ async def test_get_power_state_raises_on_404(client: PterodactylClient):
     assert error.status_code == 404
     assert "missing" in str(error)
     assert "404" in str(error)
+
+
+def test_verifies_ssl_by_default(settings: Settings):
+    with patch("bot.pterodactyl.client.httpx.AsyncClient") as mock_async_client:
+        PterodactylClient(settings)
+
+    assert mock_async_client.call_args.kwargs["verify"] is True
+
+
+def test_skip_ssl_verify_disables_verification_and_warns(settings: Settings, caplog):
+    settings.pterodactyl_skip_ssl_verify = True
+
+    with caplog.at_level("WARNING", logger="bot"):
+        with patch("bot.pterodactyl.client.httpx.AsyncClient") as mock_async_client:
+            PterodactylClient(settings)
+
+    assert mock_async_client.call_args.kwargs["verify"] is False
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("PTERODACTYL_SKIP_SSL_VERIFY" in msg for msg in messages)

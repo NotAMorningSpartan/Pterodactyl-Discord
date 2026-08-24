@@ -79,6 +79,7 @@ Copy [`.env.example`](.env.example) to `.env` for local runs.
 | `PTERODACTYL_URL`             | Base URL of the panel, no trailing slash.                                   | `https://panel.example.com`      |
 | `PTERODACTYL_APP_API_KEY`     | Application API key from an admin account (see above).                      | *(copy from Admin → Application API — treat as a secret)* |
 | `PTERODACTYL_CLIENT_API_KEY`  | Client API key from the dedicated bot subuser account (see above).          | *(copy from Account Settings → API Credentials — treat as a secret)* |
+| `PTERODACTYL_SKIP_SSL_VERIFY` | Disables TLS certificate verification for the panel connection. **Insecure** — see [Troubleshooting](#the-bot-cant-verify-the-panels-tls-certificate-certificate_verify_failed). Optional, defaults to `false`. | `false` |
 | `LOG_LEVEL`                   | Logging verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. Optional, defaults to `INFO`. | `INFO` |
 
 To get an ID, enable **Settings → Advanced → Developer Mode** in Discord, then right-click the server or
@@ -172,6 +173,33 @@ to the server in the panel → **Users**, and confirm the bot's dedicated user i
 **Control → Send Power Actions** checked. This is set per-server — adding the bot as a subuser on one
 server doesn't grant it access to any others. See [Pterodactyl-side prerequisites](#pterodactyl-side-prerequisites)
 above.
+
+### The bot can't verify the panel's TLS certificate (`CERTIFICATE_VERIFY_FAILED`)
+
+If the bot crashes with something like:
+
+```
+httpx.ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate
+```
+
+it couldn't build a trusted certificate chain when connecting to `PTERODACTYL_URL`. This is almost always
+one of:
+
+- **The panel's web server isn't serving its full certificate chain** (a common Let's Encrypt + nginx/Caddy
+  misconfiguration — the leaf cert is sent without the intermediate). Browsers often paper over this via
+  AIA fetching; most non-browser HTTP clients, including this bot's, don't. Run
+  `curl -vI https://your-panel-url` from another machine — if curl fails the same way, this is almost
+  certainly it, and the real fix is on the panel's reverse-proxy config (point `ssl_certificate` at
+  `fullchain.pem`, not just the leaf cert), not the bot.
+- **The panel uses a self-signed certificate or an internal/private CA** (common for homelab or
+  internal-network-only panels). The correct long-term fix is a real certificate in front of the panel
+  (e.g. Caddy or nginx + Let's Encrypt, including via a DNS-01 challenge for internal-only hostnames).
+
+If you can't fix the certificate right now and are on a trusted network, set `PTERODACTYL_SKIP_SSL_VERIFY=true`
+to disable certificate verification for the panel connection. This is insecure — it means anyone who can
+observe that traffic could intercept both Pterodactyl API keys, which are sent in the `Authorization`
+header on every request — so treat it as a stopgap, not a permanent setting, and never use it over an
+untrusted network. The bot logs a warning on startup whenever this is enabled as a reminder it's active.
 
 ### Discord says a slash command doesn't exist ("This command is outdated" / doesn't appear at all)
 

@@ -11,5 +11,6 @@ class Settings(BaseSettings):
     pterodactyl_url: str
     pterodactyl_app_api_key: str
     pterodactyl_client_api_key: str
+    pterodactyl_skip_ssl_verify: bool = False
 
     log_level: str = "INFO"
