@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 import discord
 import httpx
@@ -9,13 +10,22 @@ from discord.ext import commands
 
 from bot.checks import require_allowed_role
 from bot.pterodactyl.client import PterodactylAPIError, PterodactylClient
-from bot.pterodactyl.models import Server
+from bot.pterodactyl.models import PowerAction, Server
 
 logger = logging.getLogger("bot")
 
 SERVERS_PER_PAGE = 20
+SERVER_CACHE_TTL_SECONDS = 60.0
 UNREACHABLE_MESSAGE = "Couldn't reach the Pterodactyl panel. Please try again in a moment."
 API_ERROR_MESSAGE = "The Pterodactyl panel returned an error. Please try again in a moment."
+
+# States that make a given power action redundant, and the message to show instead of
+# re-sending it. Restart has no natural "already there" state, so it's intentionally absent.
+ALREADY_IN_STATE: dict[str, tuple[frozenset[str], str]] = {
+    "start": (frozenset({"running", "starting"}), "already running"),
+    "stop": (frozenset({"offline", "stopping"}), "already stopped"),
+    "kill": (frozenset({"offline"}), "already stopped — nothing to kill"),
+}
 
 
 def build_server_embeds(servers: list[Server]) -> list[discord.Embed]:
@@ -82,13 +92,114 @@ class ServerListPaginator(discord.ui.View):
         await interaction.response.edit_message(embed=self.embeds[self.index], view=self)
 
 
+class KillConfirmView(discord.ui.View):
+    def __init__(self, *, author_id: int) -> None:
+        super().__init__(timeout=30)
+        self.author_id = author_id
+        self.confirmed = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.author_id
+
+    def _disable_all(self) -> None:
+        for item in self.children:
+            item.disabled = True  # type: ignore[attr-defined]
+
+    @discord.ui.button(label="Force Kill", style=discord.ButtonStyle.danger)
+    async def confirm_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        self.confirmed = True
+        self._disable_all()
+        await interaction.response.edit_message(content="Force-killing server...", view=self)
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        self._disable_all()
+        await interaction.response.edit_message(content="Cancelled.", view=self)
+        self.stop()
+
+    async def on_timeout(self) -> None:
+        self.confirmed = False
+
+
 class PowerCog(commands.Cog, name="Power"):
+    server_group = app_commands.Group(
+        name="server", description="Control a Pterodactyl server's power state."
+    )
+
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.client = PterodactylClient(bot.settings)  # type: ignore[attr-defined]
+        self._server_cache: list[Server] = []
+        self._server_cache_expiry = 0.0
 
     async def cog_unload(self) -> None:
         await self.client.aclose()
+
+    async def _get_cached_servers(self) -> list[Server]:
+        if time.monotonic() >= self._server_cache_expiry:
+            self._server_cache = await self.client.list_servers()
+            self._server_cache_expiry = time.monotonic() + SERVER_CACHE_TTL_SECONDS
+        return self._server_cache
+
+    async def _autocomplete_server(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        try:
+            servers = await self._get_cached_servers()
+        except (httpx.RequestError, PterodactylAPIError):
+            return []
+
+        current_lower = current.lower()
+        matches = [
+            server
+            for server in servers
+            if current_lower in server.name.lower() or current_lower in server.identifier.lower()
+        ][:25]
+
+        return [
+            app_commands.Choice(name=f"{server.name} ({server.identifier})"[:100], value=server.identifier)
+            for server in matches
+        ]
+
+    async def _execute_power_action(
+        self, interaction: discord.Interaction, identifier: str, action: PowerAction
+    ) -> None:
+        already = ALREADY_IN_STATE.get(action)
+        try:
+            if already is not None:
+                states, description = already
+                current_state = await self.client.get_power_state(identifier)
+                if current_state in states:
+                    await interaction.edit_original_response(
+                        content=f"`{identifier}` is {description}."
+                    )
+                    return
+            await self.client.send_power_action(identifier, action)
+        except httpx.RequestError:
+            logger.error(
+                "Pterodactyl API unreachable sending '%s' to '%s'", action, identifier, exc_info=True
+            )
+            await interaction.edit_original_response(content=UNREACHABLE_MESSAGE)
+            return
+        except PterodactylAPIError as error:
+            if error.status_code == 404:
+                await interaction.edit_original_response(
+                    content=f"No server found with identifier `{identifier}`."
+                )
+            else:
+                logger.error(
+                    "Pterodactyl API error sending '%s' to '%s'", action, identifier, exc_info=True
+                )
+                await interaction.edit_original_response(content=API_ERROR_MESSAGE)
+            return
+
+        logger.info("Sent power action '%s' to '%s' (requested by %s)", action, identifier, interaction.user)
+        await interaction.edit_original_response(content=f"Sent **{action}** to `{identifier}`.")
 
     @app_commands.command(name="servers", description="List all Pterodactyl servers.")
     @require_allowed_role()
@@ -118,6 +229,50 @@ class PowerCog(commands.Cog, name="Power"):
 
         view = ServerListPaginator(embeds, author_id=interaction.user.id)
         view.message = await interaction.edit_original_response(embed=embeds[0], view=view)
+
+    @server_group.command(name="start", description="Start a server.")
+    @app_commands.autocomplete(server=_autocomplete_server)
+    @require_allowed_role()
+    async def server_start(self, interaction: discord.Interaction, server: str) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await self._execute_power_action(interaction, server, "start")
+
+    @server_group.command(name="restart", description="Restart a server.")
+    @app_commands.autocomplete(server=_autocomplete_server)
+    @require_allowed_role()
+    async def server_restart(self, interaction: discord.Interaction, server: str) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await self._execute_power_action(interaction, server, "restart")
+
+    @server_group.command(name="stop", description="Gracefully stop a server.")
+    @app_commands.autocomplete(server=_autocomplete_server)
+    @require_allowed_role()
+    async def server_stop(self, interaction: discord.Interaction, server: str) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await self._execute_power_action(interaction, server, "stop")
+
+    @server_group.command(
+        name="kill", description="Force-kill a server (terminates the process; requires confirmation)."
+    )
+    @app_commands.autocomplete(server=_autocomplete_server)
+    @require_allowed_role()
+    async def server_kill(self, interaction: discord.Interaction, server: str) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        view = KillConfirmView(author_id=interaction.user.id)
+        await interaction.edit_original_response(
+            content=(
+                f"This will **force-kill** `{server}`, immediately terminating the process.\n"
+                "In-progress writes may be lost, and this cannot be undone. Are you sure?"
+            ),
+            view=view,
+        )
+
+        await view.wait()
+        if not view.confirmed:
+            return
+
+        await self._execute_power_action(interaction, server, "kill")
 
 
 async def setup(bot: commands.Bot) -> None:
