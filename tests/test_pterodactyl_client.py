@@ -7,7 +7,7 @@ import respx
 
 from bot.config import Settings
 from bot.pterodactyl.client import PterodactylAPIError, PterodactylClient
-from bot.pterodactyl.models import Server
+from bot.pterodactyl.models import ResourceUsage, Server
 from tests.conftest import APP_API_KEY, CLIENT_API_KEY, PANEL_URL
 
 
@@ -106,6 +106,93 @@ async def test_get_power_state_raises_on_404(client: PterodactylClient):
     assert error.status_code == 404
     assert "missing" in str(error)
     assert "404" in str(error)
+
+
+@respx.mock
+async def test_get_resource_usage_running(client: PterodactylClient):
+    respx.get(f"{PANEL_URL}/api/client/servers/abc111/resources").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "object": "stats",
+                "attributes": {
+                    "current_state": "running",
+                    "is_suspended": False,
+                    "resources": {
+                        "memory_bytes": 536870912,
+                        "memory_limit_bytes": 1073741824,
+                        "cpu_absolute": 12.5,
+                        "disk_bytes": 2147483648,
+                        "network": {"rx_bytes": 1000, "tx_bytes": 2000},
+                        "uptime": 3661000,
+                    },
+                },
+            },
+        )
+    )
+
+    usage = await client.get_resource_usage("abc111")
+
+    assert usage == ResourceUsage(
+        current_state="running",
+        is_suspended=False,
+        memory_bytes=536870912,
+        memory_limit_bytes=1073741824,
+        cpu_absolute=12.5,
+        disk_bytes=2147483648,
+        network_rx_bytes=1000,
+        network_tx_bytes=2000,
+        uptime=3661000,
+    )
+
+
+@respx.mock
+async def test_get_resource_usage_offline_is_zeroed(client: PterodactylClient):
+    respx.get(f"{PANEL_URL}/api/client/servers/abc111/resources").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "object": "stats",
+                "attributes": {
+                    "current_state": "offline",
+                    "is_suspended": False,
+                    "resources": {
+                        "memory_bytes": 0,
+                        "memory_limit_bytes": 1073741824,
+                        "cpu_absolute": 0,
+                        "disk_bytes": 0,
+                        "network": {"rx_bytes": 0, "tx_bytes": 0},
+                        "uptime": 0,
+                    },
+                },
+            },
+        )
+    )
+
+    usage = await client.get_resource_usage("abc111")
+
+    assert usage.current_state == "offline"
+    assert usage.memory_bytes == 0
+    assert usage.cpu_absolute == 0
+    assert usage.disk_bytes == 0
+    assert usage.network_rx_bytes == 0
+    assert usage.network_tx_bytes == 0
+    assert usage.uptime == 0
+
+
+@respx.mock
+async def test_get_resource_usage_raises_on_404(client: PterodactylClient):
+    respx.get(f"{PANEL_URL}/api/client/servers/missing/resources").mock(
+        return_value=httpx.Response(
+            404, json={"errors": [{"code": "NotFoundHttpException", "detail": "Not found."}]}
+        )
+    )
+
+    with pytest.raises(PterodactylAPIError) as exc_info:
+        await client.get_resource_usage("missing")
+
+    assert exc_info.value.identifier == "missing"
+    assert exc_info.value.status_code == 404
 
 
 def test_verifies_ssl_by_default(settings: Settings):
