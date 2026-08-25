@@ -20,6 +20,7 @@ class ResourceUsage(BaseModel):
     memory_limit_bytes: int
     cpu_absolute: float
     disk_bytes: int
+    disk_limit_bytes: int
     network_rx_bytes: int
     network_tx_bytes: int
     uptime: int  # milliseconds

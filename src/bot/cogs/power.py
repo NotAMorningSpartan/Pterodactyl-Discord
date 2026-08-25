@@ -80,6 +80,11 @@ def _format_bytes(num_bytes: int) -> str:
     return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
 
 
+def _format_usage_over_limit(used_bytes: int, limit_bytes: int) -> str:
+    limit = "Unlimited" if limit_bytes == 0 else _format_bytes(limit_bytes)
+    return f"{_format_bytes(used_bytes)} / {limit}"
+
+
 def build_stats_embed(identifier: str, usage: ResourceUsage) -> discord.Embed:
     embed = discord.Embed(title=f"Server Stats: `{identifier}`")
     embed.add_field(name="State", value=usage.current_state.capitalize(), inline=True)
@@ -88,16 +93,18 @@ def build_stats_embed(identifier: str, usage: ResourceUsage) -> discord.Embed:
         embed.add_field(name="Uptime", value="0", inline=True)
         return embed
 
-    memory_limit = (
-        "Unlimited" if usage.memory_limit_bytes == 0 else _format_bytes(usage.memory_limit_bytes)
-    )
-
     embed.add_field(name="Uptime", value=_format_duration(usage.uptime), inline=True)
     embed.add_field(
-        name="Memory", value=f"{_format_bytes(usage.memory_bytes)} / {memory_limit}", inline=True
+        name="Memory",
+        value=_format_usage_over_limit(usage.memory_bytes, usage.memory_limit_bytes),
+        inline=True,
     )
     embed.add_field(name="CPU", value=f"{usage.cpu_absolute:.1f}%", inline=True)
-    embed.add_field(name="Disk", value=_format_bytes(usage.disk_bytes), inline=True)
+    embed.add_field(
+        name="Disk",
+        value=_format_usage_over_limit(usage.disk_bytes, usage.disk_limit_bytes),
+        inline=True,
+    )
     embed.add_field(
         name="Network I/O",
         value=f"↓ {_format_bytes(usage.network_rx_bytes)} / ↑ {_format_bytes(usage.network_tx_bytes)}",
