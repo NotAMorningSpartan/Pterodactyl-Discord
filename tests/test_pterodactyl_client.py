@@ -108,7 +108,7 @@ async def test_get_power_state_raises_on_404(client: PterodactylClient):
     assert "404" in str(error)
 
 
-def _mock_server_details(identifier: str, *, disk_limit_mb: int) -> None:
+def _mock_server_details(identifier: str, *, memory_limit_mb: int = 1024, disk_limit_mb: int) -> None:
     respx.get(f"{PANEL_URL}/api/client/servers/{identifier}").mock(
         return_value=httpx.Response(
             200,
@@ -117,7 +117,7 @@ def _mock_server_details(identifier: str, *, disk_limit_mb: int) -> None:
                 "attributes": {
                     "identifier": identifier,
                     "limits": {
-                        "memory": 1024,
+                        "memory": memory_limit_mb,
                         "swap": 0,
                         "disk": disk_limit_mb,
                         "io": 500,
@@ -131,6 +131,7 @@ def _mock_server_details(identifier: str, *, disk_limit_mb: int) -> None:
 
 @respx.mock
 async def test_get_resource_usage_running(client: PterodactylClient):
+    # Real /resources payloads only ever report current usage -- no limit fields.
     respx.get(f"{PANEL_URL}/api/client/servers/abc111/resources").mock(
         return_value=httpx.Response(
             200,
@@ -141,7 +142,6 @@ async def test_get_resource_usage_running(client: PterodactylClient):
                     "is_suspended": False,
                     "resources": {
                         "memory_bytes": 536870912,
-                        "memory_limit_bytes": 1073741824,
                         "cpu_absolute": 12.5,
                         "disk_bytes": 2147483648,
                         "network": {"rx_bytes": 1000, "tx_bytes": 2000},
@@ -151,7 +151,7 @@ async def test_get_resource_usage_running(client: PterodactylClient):
             },
         )
     )
-    _mock_server_details("abc111", disk_limit_mb=5120)
+    _mock_server_details("abc111", memory_limit_mb=1024, disk_limit_mb=5120)
 
     usage = await client.get_resource_usage("abc111")
 
@@ -159,7 +159,7 @@ async def test_get_resource_usage_running(client: PterodactylClient):
         current_state="running",
         is_suspended=False,
         memory_bytes=536870912,
-        memory_limit_bytes=1073741824,
+        memory_limit_bytes=1024 * 1024 * 1024,
         cpu_absolute=12.5,
         disk_bytes=2147483648,
         disk_limit_bytes=5120 * 1024 * 1024,
@@ -181,7 +181,6 @@ async def test_get_resource_usage_offline_is_zeroed(client: PterodactylClient):
                     "is_suspended": False,
                     "resources": {
                         "memory_bytes": 0,
-                        "memory_limit_bytes": 1073741824,
                         "cpu_absolute": 0,
                         "disk_bytes": 0,
                         "network": {"rx_bytes": 0, "tx_bytes": 0},
@@ -205,7 +204,7 @@ async def test_get_resource_usage_offline_is_zeroed(client: PterodactylClient):
 
 
 @respx.mock
-async def test_get_resource_usage_unlimited_disk_is_zero(client: PterodactylClient):
+async def test_get_resource_usage_unlimited_memory_and_disk_are_zero(client: PterodactylClient):
     respx.get(f"{PANEL_URL}/api/client/servers/abc111/resources").mock(
         return_value=httpx.Response(
             200,
@@ -216,7 +215,6 @@ async def test_get_resource_usage_unlimited_disk_is_zero(client: PterodactylClie
                     "is_suspended": False,
                     "resources": {
                         "memory_bytes": 536870912,
-                        "memory_limit_bytes": 1073741824,
                         "cpu_absolute": 12.5,
                         "disk_bytes": 2147483648,
                         "network": {"rx_bytes": 1000, "tx_bytes": 2000},
@@ -226,10 +224,11 @@ async def test_get_resource_usage_unlimited_disk_is_zero(client: PterodactylClie
             },
         )
     )
-    _mock_server_details("abc111", disk_limit_mb=0)
+    _mock_server_details("abc111", memory_limit_mb=0, disk_limit_mb=0)
 
     usage = await client.get_resource_usage("abc111")
 
+    assert usage.memory_limit_bytes == 0
     assert usage.disk_limit_bytes == 0
 
 
@@ -259,7 +258,6 @@ async def test_get_resource_usage_raises_on_404_from_details_call(client: Pterod
                     "is_suspended": False,
                     "resources": {
                         "memory_bytes": 0,
-                        "memory_limit_bytes": 0,
                         "cpu_absolute": 0,
                         "disk_bytes": 0,
                         "network": {"rx_bytes": 0, "tx_bytes": 0},
@@ -278,7 +276,6 @@ async def test_get_resource_usage_raises_on_404_from_details_call(client: Pterod
     with pytest.raises(PterodactylAPIError) as exc_info:
         await client.get_resource_usage("abc111")
 
-    assert exc_info.value.status_code == 404
     assert exc_info.value.status_code == 404
 
 
