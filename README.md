@@ -1,14 +1,16 @@
 # Pterodactyl-Discord
 
 A Discord bot that lets members of a single trusted role list [Pterodactyl](https://pterodactyl.io/) panel
-server instances and control their power state (start, restart, stop, kill) from Discord — without giving
-anyone panel access.
+server instances, control their power state (start, restart, stop, kill), and check resource usage from
+Discord — without giving anyone panel access.
 
 ## What it does
 
 - **`/servers`** — lists every server on the panel (name, identifier, node) as a paginated embed.
 - **`/server start`** / **`/server restart`** / **`/server stop`** / **`/server kill`** — sends a power
   action to one server, picked via autocomplete.
+- **`/server stats`** — shows one server's current state, uptime, memory/disk usage (with limits), CPU
+  usage, and network I/O as an ephemeral embed.
 
 ## Permission model
 

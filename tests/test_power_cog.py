@@ -28,6 +28,7 @@ def make_usage(**overrides) -> ResourceUsage:
         memory_limit_bytes=1073741824,
         cpu_absolute=12.5,
         disk_bytes=2147483648,
+        disk_limit_bytes=5368709120,
         network_rx_bytes=1024,
         network_tx_bytes=2048,
         uptime=274320000,
@@ -400,7 +401,7 @@ def test_stats_embed_running_shows_all_fields():
     assert fields["Uptime"] == "3d 4h 12m"
     assert fields["Memory"] == "512.0 MB / 1.0 GB"
     assert fields["CPU"] == "12.5%"
-    assert fields["Disk"] == "2.0 GB"
+    assert fields["Disk"] == "2.0 GB / 5.0 GB"
     assert fields["Network I/O"] == "↓ 1.0 KB / ↑ 2.0 KB"
 
 
@@ -411,6 +412,15 @@ def test_stats_embed_unlimited_memory():
 
     fields = {f.name: f.value for f in embed.fields}
     assert fields["Memory"] == "512.0 MB / Unlimited"
+
+
+def test_stats_embed_unlimited_disk():
+    usage = make_usage(disk_limit_bytes=0)
+
+    embed = build_stats_embed("srv001", usage)
+
+    fields = {f.name: f.value for f in embed.fields}
+    assert fields["Disk"] == "2.0 GB / Unlimited"
 
 
 def test_stats_embed_offline_skips_resource_fields():

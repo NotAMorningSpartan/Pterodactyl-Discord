@@ -109,14 +109,24 @@ class PterodactylClient:
         return response.json()["attributes"]["current_state"]
 
     async def get_resource_usage(self, identifier: str) -> ResourceUsage:
-        response = await self._http.get(
+        resources_response = await self._http.get(
             f"/api/client/servers/{identifier}/resources",
             headers=self._headers(self._client_api_key),
         )
-        self._raise_for_status(response, identifier)
-        attrs = response.json()["attributes"]
+        self._raise_for_status(resources_response, identifier)
+        attrs = resources_response.json()["attributes"]
         resources = attrs["resources"]
         network = resources.get("network") or {}
+
+        # /resources has no disk limit -- only the server-details endpoint does
+        # (attributes.limits.disk, in MiB; 0 means unlimited).
+        details_response = await self._http.get(
+            f"/api/client/servers/{identifier}",
+            headers=self._headers(self._client_api_key),
+        )
+        self._raise_for_status(details_response, identifier)
+        disk_limit_mb = details_response.json()["attributes"]["limits"]["disk"]
+
         return ResourceUsage(
             current_state=attrs["current_state"],
             is_suspended=attrs["is_suspended"],
@@ -124,6 +134,7 @@ class PterodactylClient:
             memory_limit_bytes=resources["memory_limit_bytes"],
             cpu_absolute=resources["cpu_absolute"],
             disk_bytes=resources["disk_bytes"],
+            disk_limit_bytes=disk_limit_mb * 1024 * 1024,
             network_rx_bytes=network.get("rx_bytes", 0),
             network_tx_bytes=network.get("tx_bytes", 0),
             uptime=resources["uptime"],

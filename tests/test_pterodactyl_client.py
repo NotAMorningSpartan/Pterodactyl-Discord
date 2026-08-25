@@ -108,6 +108,27 @@ async def test_get_power_state_raises_on_404(client: PterodactylClient):
     assert "404" in str(error)
 
 
+def _mock_server_details(identifier: str, *, disk_limit_mb: int) -> None:
+    respx.get(f"{PANEL_URL}/api/client/servers/{identifier}").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "object": "server",
+                "attributes": {
+                    "identifier": identifier,
+                    "limits": {
+                        "memory": 1024,
+                        "swap": 0,
+                        "disk": disk_limit_mb,
+                        "io": 500,
+                        "cpu": 100,
+                    },
+                },
+            },
+        )
+    )
+
+
 @respx.mock
 async def test_get_resource_usage_running(client: PterodactylClient):
     respx.get(f"{PANEL_URL}/api/client/servers/abc111/resources").mock(
@@ -130,6 +151,7 @@ async def test_get_resource_usage_running(client: PterodactylClient):
             },
         )
     )
+    _mock_server_details("abc111", disk_limit_mb=5120)
 
     usage = await client.get_resource_usage("abc111")
 
@@ -140,6 +162,7 @@ async def test_get_resource_usage_running(client: PterodactylClient):
         memory_limit_bytes=1073741824,
         cpu_absolute=12.5,
         disk_bytes=2147483648,
+        disk_limit_bytes=5120 * 1024 * 1024,
         network_rx_bytes=1000,
         network_tx_bytes=2000,
         uptime=3661000,
@@ -168,6 +191,7 @@ async def test_get_resource_usage_offline_is_zeroed(client: PterodactylClient):
             },
         )
     )
+    _mock_server_details("abc111", disk_limit_mb=5120)
 
     usage = await client.get_resource_usage("abc111")
 
@@ -178,6 +202,35 @@ async def test_get_resource_usage_offline_is_zeroed(client: PterodactylClient):
     assert usage.network_rx_bytes == 0
     assert usage.network_tx_bytes == 0
     assert usage.uptime == 0
+
+
+@respx.mock
+async def test_get_resource_usage_unlimited_disk_is_zero(client: PterodactylClient):
+    respx.get(f"{PANEL_URL}/api/client/servers/abc111/resources").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "object": "stats",
+                "attributes": {
+                    "current_state": "running",
+                    "is_suspended": False,
+                    "resources": {
+                        "memory_bytes": 536870912,
+                        "memory_limit_bytes": 1073741824,
+                        "cpu_absolute": 12.5,
+                        "disk_bytes": 2147483648,
+                        "network": {"rx_bytes": 1000, "tx_bytes": 2000},
+                        "uptime": 3661000,
+                    },
+                },
+            },
+        )
+    )
+    _mock_server_details("abc111", disk_limit_mb=0)
+
+    usage = await client.get_resource_usage("abc111")
+
+    assert usage.disk_limit_bytes == 0
 
 
 @respx.mock
@@ -192,6 +245,40 @@ async def test_get_resource_usage_raises_on_404(client: PterodactylClient):
         await client.get_resource_usage("missing")
 
     assert exc_info.value.identifier == "missing"
+
+
+@respx.mock
+async def test_get_resource_usage_raises_on_404_from_details_call(client: PterodactylClient):
+    respx.get(f"{PANEL_URL}/api/client/servers/abc111/resources").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "object": "stats",
+                "attributes": {
+                    "current_state": "running",
+                    "is_suspended": False,
+                    "resources": {
+                        "memory_bytes": 0,
+                        "memory_limit_bytes": 0,
+                        "cpu_absolute": 0,
+                        "disk_bytes": 0,
+                        "network": {"rx_bytes": 0, "tx_bytes": 0},
+                        "uptime": 0,
+                    },
+                },
+            },
+        )
+    )
+    respx.get(f"{PANEL_URL}/api/client/servers/abc111").mock(
+        return_value=httpx.Response(
+            404, json={"errors": [{"code": "NotFoundHttpException", "detail": "Not found."}]}
+        )
+    )
+
+    with pytest.raises(PterodactylAPIError) as exc_info:
+        await client.get_resource_usage("abc111")
+
+    assert exc_info.value.status_code == 404
     assert exc_info.value.status_code == 404
 
 
