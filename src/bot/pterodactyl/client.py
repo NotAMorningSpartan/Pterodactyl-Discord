@@ -6,7 +6,7 @@ from typing import Any, Self
 import httpx
 
 from bot.config import Settings
-from bot.pterodactyl.models import PowerAction, PowerState, Server
+from bot.pterodactyl.models import PowerAction, PowerState, ResourceUsage, Server
 
 logger = logging.getLogger("bot")
 
@@ -107,6 +107,27 @@ class PterodactylClient:
         )
         self._raise_for_status(response, identifier)
         return response.json()["attributes"]["current_state"]
+
+    async def get_resource_usage(self, identifier: str) -> ResourceUsage:
+        response = await self._http.get(
+            f"/api/client/servers/{identifier}/resources",
+            headers=self._headers(self._client_api_key),
+        )
+        self._raise_for_status(response, identifier)
+        attrs = response.json()["attributes"]
+        resources = attrs["resources"]
+        network = resources.get("network") or {}
+        return ResourceUsage(
+            current_state=attrs["current_state"],
+            is_suspended=attrs["is_suspended"],
+            memory_bytes=resources["memory_bytes"],
+            memory_limit_bytes=resources["memory_limit_bytes"],
+            cpu_absolute=resources["cpu_absolute"],
+            disk_bytes=resources["disk_bytes"],
+            network_rx_bytes=network.get("rx_bytes", 0),
+            network_tx_bytes=network.get("tx_bytes", 0),
+            uptime=resources["uptime"],
+        )
 
     async def send_power_action(self, identifier: str, action: PowerAction) -> None:
         response = await self._http.post(

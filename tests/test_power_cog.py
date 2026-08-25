@@ -11,10 +11,29 @@ from bot.cogs.power import (
     KillConfirmView,
     PowerCog,
     ServerListPaginator,
+    _format_bytes,
+    _format_duration,
     build_server_embeds,
+    build_stats_embed,
 )
 from bot.pterodactyl.client import PterodactylAPIError
-from bot.pterodactyl.models import Server
+from bot.pterodactyl.models import ResourceUsage, Server
+
+
+def make_usage(**overrides) -> ResourceUsage:
+    defaults = dict(
+        current_state="running",
+        is_suspended=False,
+        memory_bytes=536870912,
+        memory_limit_bytes=1073741824,
+        cpu_absolute=12.5,
+        disk_bytes=2147483648,
+        network_rx_bytes=1024,
+        network_tx_bytes=2048,
+        uptime=274320000,
+    )
+    defaults.update(overrides)
+    return ResourceUsage(**defaults)
 
 
 def make_servers(count: int) -> list[Server]:
@@ -327,3 +346,135 @@ async def test_server_kill_confirmed_but_already_offline_skips_action(monkeypatc
     cog.client.send_power_action.assert_not_called()
     last_call = interaction.edit_original_response.call_args_list[-1]
     assert "nothing to kill" in last_call.kwargs["content"]
+
+
+# --- formatting helpers ---------------------------------------------------------------
+
+
+def test_format_duration_zero_is_seconds():
+    assert _format_duration(0) == "0s"
+
+
+def test_format_duration_under_a_minute():
+    assert _format_duration(45_000) == "45s"
+
+
+def test_format_duration_hours_and_minutes():
+    assert _format_duration((62 * 60) * 1000) == "1h 2m"
+
+
+def test_format_duration_days_hours_minutes():
+    ms = ((3 * 86400) + (4 * 3600) + (12 * 60)) * 1000
+    assert _format_duration(ms) == "3d 4h 12m"
+
+
+def test_format_bytes_under_one_kb():
+    assert _format_bytes(512) == "512 B"
+
+
+def test_format_bytes_kb():
+    assert _format_bytes(1536) == "1.5 KB"
+
+
+def test_format_bytes_gb():
+    assert _format_bytes(1073741824) == "1.0 GB"
+
+
+def test_format_bytes_zero():
+    assert _format_bytes(0) == "0 B"
+
+
+# --- stats embed -----------------------------------------------------------------------
+
+
+def test_stats_embed_running_shows_all_fields():
+    usage = make_usage(current_state="running")
+
+    embed = build_stats_embed("srv001", usage)
+
+    field_names = [f.name for f in embed.fields]
+    assert field_names == ["State", "Uptime", "Memory", "CPU", "Disk", "Network I/O"]
+
+    fields = {f.name: f.value for f in embed.fields}
+    assert fields["State"] == "Running"
+    assert fields["Uptime"] == "3d 4h 12m"
+    assert fields["Memory"] == "512.0 MB / 1.0 GB"
+    assert fields["CPU"] == "12.5%"
+    assert fields["Disk"] == "2.0 GB"
+    assert fields["Network I/O"] == "↓ 1.0 KB / ↑ 2.0 KB"
+
+
+def test_stats_embed_unlimited_memory():
+    usage = make_usage(memory_limit_bytes=0)
+
+    embed = build_stats_embed("srv001", usage)
+
+    fields = {f.name: f.value for f in embed.fields}
+    assert fields["Memory"] == "512.0 MB / Unlimited"
+
+
+def test_stats_embed_offline_skips_resource_fields():
+    usage = make_usage(
+        current_state="offline",
+        memory_bytes=0,
+        cpu_absolute=0,
+        disk_bytes=0,
+        network_rx_bytes=0,
+        network_tx_bytes=0,
+        uptime=0,
+    )
+
+    embed = build_stats_embed("srv001", usage)
+
+    field_names = [f.name for f in embed.fields]
+    assert field_names == ["State", "Uptime"]
+    fields = {f.name: f.value for f in embed.fields}
+    assert fields["State"] == "Offline"
+    assert fields["Uptime"] == "0"
+
+
+# --- /server stats command --------------------------------------------------------------
+
+
+async def test_server_stats_replies_with_embed_on_success():
+    cog = make_cog()
+    cog.client.get_resource_usage.return_value = make_usage()
+    interaction = make_interaction()
+
+    await PowerCog.server_stats.callback(cog, interaction, "srv001")
+
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    _, kwargs = interaction.edit_original_response.call_args
+    assert isinstance(kwargs["embed"], discord.Embed)
+
+
+async def test_server_stats_reports_server_not_found():
+    cog = make_cog()
+    cog.client.get_resource_usage.side_effect = PterodactylAPIError("srv001", 404, "Not found")
+    interaction = make_interaction()
+
+    await PowerCog.server_stats.callback(cog, interaction, "srv001")
+
+    interaction.edit_original_response.assert_awaited_once_with(
+        content="No server found with identifier `srv001`."
+    )
+
+
+async def test_server_stats_reports_unreachable_api():
+    cog = make_cog()
+    cog.client.get_resource_usage.side_effect = httpx.ConnectError("connection refused")
+    interaction = make_interaction()
+
+    await PowerCog.server_stats.callback(cog, interaction, "srv001")
+
+    interaction.edit_original_response.assert_awaited_once_with(content=UNREACHABLE_MESSAGE)
+
+
+async def test_server_stats_reports_generic_api_error():
+    cog = make_cog()
+    cog.client.get_resource_usage.side_effect = PterodactylAPIError("srv001", 500, "boom")
+    interaction = make_interaction()
+
+    await PowerCog.server_stats.callback(cog, interaction, "srv001")
+
+    interaction.edit_original_response.assert_awaited_once_with(content=API_ERROR_MESSAGE)
